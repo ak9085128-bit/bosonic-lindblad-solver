@@ -1,7 +1,7 @@
 
 # Paste your COMPLETE Bosonic Lindblad Solver
 # Python program below this line.
-!pip install qutip streamlit
+
 import math
 from itertools import product
 
