@@ -3,3 +3,4 @@ qutip
 numpy
 pandas
 matplotlib
+scipy
