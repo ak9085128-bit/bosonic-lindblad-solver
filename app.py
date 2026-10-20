@@ -1,46 +1,43 @@
-
-# Paste your COMPLETE Bosonic Lindblad Solver
-# Python program below this line.
+!pip install qutip streamlit
 
 import math
-from itertools import product
+from itertools import product, combinations
+from math import comb
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import qutip as qt
 import streamlit as st
+from scipy.sparse import lil_matrix
+from scipy.sparse.linalg import expm_multiply
 
-
-# --------------------------------------------------
+# ============================================================
 # 1. APP CONFIGURATION
-# --------------------------------------------------
+# ============================================================
 
 st.set_page_config(
-    page_title="Bosonic Lindblad Solver",
+    page_title="Quantum Thermal Systems Solver",
     page_icon="⚛️",
     layout="wide",
 )
 
-st.title("⚛️ Bosonic Lindblad Solver")
-st.write(
-    "Simulate fixed-particle-number bosonic systems "
-    "interacting with a thermal bath."
+st.title("⚛️ Quantum Thermal Systems Solver")
+
+page = st.sidebar.radio(
+    "Choose simulation",
+    [
+        "Bosonic Lindblad Solver",
+        "Fermionic Quantum Otto Engine",
+    ],
 )
 
-st.info(
-    "Model: identical bosons, equally spaced energy levels, "
-    "adjacent-level thermal transitions, and a Markovian bath. "
-    "Set kB = hbar = 1."
-)
-
-
-# --------------------------------------------------
-# 2. BUILD THE FIXED-N BOSONIC BASIS
-# --------------------------------------------------
+# ============================================================
+# 2. BOSONIC LINDBLAD SOLVER
+# ============================================================
 
 def make_basis(N, M):
-    """Occupation-number states with exactly N bosons in M modes."""
+    """All occupation states containing exactly N bosons."""
     return [
         tuple(occ)
         for occ in product(range(N + 1), repeat=M)
@@ -49,64 +46,42 @@ def make_basis(N, M):
 
 
 def build_hamiltonian(basis, omega):
-    """
-    H = sum_i (i * omega) * n_i.
-    The zero of energy is the lowest single-particle level.
-    """
-    energies = [
+    energies = np.array([
         sum(i * omega * n for i, n in enumerate(occ))
         for occ in basis
-    ]
-    return qt.Qobj(np.diag(energies)), np.array(energies)
+    ], dtype=float)
+    return qt.Qobj(np.diag(energies)), energies
 
-
-# --------------------------------------------------
-# 3. BUILD PHYSICAL BOSONIC TRANSITION OPERATORS
-# --------------------------------------------------
 
 def build_transitions(basis, M):
-    """
-    A_i = a_i^dagger a_(i+1).
-
-    Matrix elements:
-    sqrt((n_i + 1) * n_(i+1))
-
-    A_i moves one boson down by one energy level.
-    Its adjoint moves one boson up.
-    """
-    index = {occ: j for j, occ in enumerate(basis)}
+    """Adjacent-level bosonic lowering operators."""
+    index = {state: i for i, state in enumerate(basis)}
     dim = len(basis)
     operators = []
 
     for i in range(M - 1):
         matrix = np.zeros((dim, dim), dtype=complex)
 
-        for col, occ in enumerate(basis):
-            ni = occ[i]
-            nj = occ[i + 1]
+        for col, state in enumerate(basis):
+            ni, nj = state[i], state[i + 1]
 
             if nj == 0:
                 continue
 
-            new_occ = list(occ)
-            new_occ[i] += 1
-            new_occ[i + 1] -= 1
-            new_occ = tuple(new_occ)
+            new_state = list(state)
+            new_state[i] += 1
+            new_state[i + 1] -= 1
 
-            row = index[new_occ]
-            matrix[row, col] = math.sqrt((ni + 1) * nj)
+            matrix[index[tuple(new_state)], col] = math.sqrt(
+                (ni + 1) * nj
+            )
 
         operators.append(qt.Qobj(matrix))
 
     return operators
 
 
-# --------------------------------------------------
-# 4. THERMAL BATH AND LINDBLAD EQUATION
-# --------------------------------------------------
-
 def thermal_occupation(omega, temperature):
-    """Bose-Einstein occupation, with kB = hbar = 1."""
     if temperature <= 0:
         return 0.0
 
@@ -118,290 +93,485 @@ def thermal_occupation(omega, temperature):
     return 1.0 / np.expm1(x)
 
 
-def solve_system(N, M, omega, temperature, gamma, t_final, num_times):
+def solve_bosonic_system(N, M, omega, T, gamma, t_final, num_times):
     basis = make_basis(N, M)
-    dim = len(basis)
-
     H, energies = build_hamiltonian(basis, omega)
-    transitions = build_transitions(basis, M)
+    nbar = thermal_occupation(omega, T)
 
-    nbar = thermal_occupation(omega, temperature)
     c_ops = []
 
-    for A in transitions:
-        # Downward transitions: emission into the bath
-        c_ops.append(
-            np.sqrt(gamma * (nbar + 1.0)) * A
-        )
+    for A in build_transitions(basis, M):
+        c_ops.append(np.sqrt(gamma * (nbar + 1)) * A)
 
-        # Upward transitions: absorption from the bath
         if nbar > 0:
-            c_ops.append(
-                np.sqrt(gamma * nbar) * A.dag()
-            )
+            c_ops.append(np.sqrt(gamma * nbar) * A.dag())
 
-    # Start in the ground configuration:
-    # all N bosons occupy the lowest level.
-    ground_occ = (N,) + (0,) * (M - 1)
-    ground_index = basis.index(ground_occ)
+    ground = (N,) + (0,) * (M - 1)
+    rho0 = qt.ket2dm(qt.basis(len(basis), basis.index(ground)))
+    times = np.linspace(0, t_final, num_times)
 
-    psi0 = qt.basis(dim, ground_index)
-    rho0 = qt.ket2dm(psi0)
-
-    times = np.linspace(0.0, t_final, num_times)
-
-    result = qt.mesolve(
-        H,
-        rho0,
-        times,
-        c_ops=c_ops,
-        e_ops=[],
-    )
+    result = qt.mesolve(H, rho0, times, c_ops=c_ops, e_ops=[])
 
     return basis, energies, times, result, nbar
 
 
-# --------------------------------------------------
-# 5. USER INPUTS
-# --------------------------------------------------
-
-st.sidebar.header("Simulation parameters")
-
-N = st.sidebar.number_input(
-    "Number of bosons (N)",
-    min_value=1,
-    max_value=10,
-    value=2,
-    step=1,
-)
-
-M = st.sidebar.number_input(
-    "Number of energy levels (M)",
-    min_value=2,
-    max_value=8,
-    value=3,
-    step=1,
-)
-
-omega = st.sidebar.number_input(
-    "Energy spacing (ω)",
-    min_value=0.01,
-    max_value=100.0,
-    value=1.0,
-    step=0.1,
-)
-
-temperature = st.sidebar.number_input(
-    "Bath temperature (T)",
-    min_value=0.0,
-    max_value=100.0,
-    value=3.0,
-    step=0.1,
-)
-
-gamma = st.sidebar.number_input(
-    "Bath coupling strength (γ)",
-    min_value=0.0,
-    max_value=100.0,
-    value=1.0,
-    step=0.1,
-)
-
-t_final = st.sidebar.number_input(
-    "Final simulation time",
-    min_value=0.1,
-    max_value=1000.0,
-    value=10.0,
-    step=1.0,
-)
-
-num_times = st.sidebar.number_input(
-    "Number of time points",
-    min_value=11,
-    max_value=501,
-    value=101,
-    step=10,
-)
-
-dim = math.comb(N + M - 1, N)
-
-st.sidebar.caption(f"Hilbert-space dimension: {dim}")
-
-# Protect a phone or small server from oversized calculations.
-if dim > 200:
-    st.warning(
-        "This system has too many basis states for this demo. "
-        "Reduce N or M until the dimension is at most 200."
+def show_bosonic_solver():
+    st.header("Bosonic Lindblad Solver")
+    st.write(
+        "Fixed-particle-number bosons coupled to a thermal Markovian bath. "
+        "We use kB = hbar = 1."
     )
-    st.stop()
 
-run = st.sidebar.button(
-    "▶ Run Simulation",
-    type="primary",
-    use_container_width=True,
-)
+    st.sidebar.subheader("Bosonic parameters")
 
+    N = int(st.sidebar.number_input(
+        "Number of bosons (N)", 1, 10, 2, key="b_N"
+    ))
+    M = int(st.sidebar.number_input(
+        "Number of energy levels (M)", 2, 8, 3, key="b_M"
+    ))
+    omega = float(st.sidebar.number_input(
+        "Energy spacing (ω)", 0.01, 100.0, 1.0, step=0.1,
+        key="b_omega"
+    ))
+    T = float(st.sidebar.number_input(
+        "Bath temperature (T)", 0.0, 100.0, 3.0, step=0.1,
+        key="b_T"
+    ))
+    gamma = float(st.sidebar.number_input(
+        "Bath coupling (γ)", 0.001, 100.0, 1.0, step=0.1,
+        key="b_gamma"
+    ))
+    t_final = float(st.sidebar.number_input(
+        "Final time", 0.1, 1000.0, 10.0, step=1.0,
+        key="b_time"
+    ))
+    num_times = int(st.sidebar.number_input(
+        "Number of time points", 11, 501, 101, step=10,
+        key="b_points"
+    ))
 
-# --------------------------------------------------
-# 6. RUN SIMULATION AND SHOW RESULTS
-# --------------------------------------------------
+    dim = comb(N + M - 1, N)
+    st.sidebar.caption(f"Hilbert-space dimension: {dim}")
 
-if run:
+    if dim > 200:
+        st.warning("Reduce N or M: this simulation is limited to 200 states.")
+        return
+
+    if not st.button("▶ Run Bosonic Simulation", type="primary"):
+        st.info("Set the parameters and run the bosonic simulation.")
+        return
+
     try:
         with st.spinner("Solving the Lindblad master equation..."):
-            basis, energies, times, result, nbar = solve_system(
-                int(N),
-                int(M),
-                float(omega),
-                float(temperature),
-                float(gamma),
-                float(t_final),
-                int(num_times),
+            basis, energies, times, result, nbar = solve_bosonic_system(
+                N, M, omega, T, gamma, t_final, num_times
             )
 
-        states = result.states
-        final_rho = states[-1]
+            final_rho = result.states[-1]
+            populations = np.array([
+                np.real(np.diag(rho.full())) for rho in result.states
+            ])
+            labels = [str(s) for s in basis]
 
-        populations = np.array([
-            np.real(np.diag(rho.full()))
-            for rho in states
-        ])
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Basis states", len(basis))
+            c2.metric("Thermal occupation", f"{nbar:.5f}")
+            c3.metric("Final trace", f"{np.real(final_rho.tr()):.8f}")
 
-        st.success("Simulation completed.")
+            st.subheader("1. Fock-state populations")
+            fig, ax = plt.subplots(figsize=(9, 5))
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Basis states", len(basis))
-        col2.metric("Thermal occupation", f"{nbar:.5f}")
-        col3.metric("Final trace", f"{np.real(final_rho.tr()):.8f}")
+            chosen = np.argsort(populations[-1])[-min(8, len(basis)):]
 
-        # Population curves
-        st.subheader("1. Fock-state populations")
+            for j in chosen:
+                ax.plot(times, populations[:, j], label=labels[j])
 
-        fig, ax = plt.subplots(figsize=(9, 5))
+            ax.set_xlabel("Time")
+            ax.set_ylabel("Population")
+            ax.set_ylim(bottom=0)
+            ax.grid(alpha=0.3)
+            ax.legend(fontsize=8)
+            fig.tight_layout()
+            st.pyplot(fig)
+            plt.close(fig)
 
-        # Plot up to eight states with the largest final populations.
-        chosen = np.argsort(populations[-1])[-min(8, len(basis)):]
+            st.subheader("2. Mean occupation of each level")
+            mean_occ = np.zeros((len(times), M))
 
-        for j in chosen:
-            label = str(basis[j])
-            ax.plot(times, populations[:, j], label=label)
+            for j, state in enumerate(basis):
+                for level in range(M):
+                    mean_occ[:, level] += populations[:, j] * state[level]
 
-        ax.set_xlabel("Time")
-        ax.set_ylabel("Population")
-        ax.set_ylim(bottom=0)
-        ax.grid(True, alpha=0.3)
-        ax.legend(title="Occupation state", fontsize=8)
-        fig.tight_layout()
-        st.pyplot(fig)
-        plt.close(fig)
+            fig, ax = plt.subplots(figsize=(9, 5))
 
-        st.caption(
-            "Each occupation tuple lists the boson count in levels "
-            "0, 1, 2, ... respectively."
-        )
+            for level in range(M):
+                ax.plot(times, mean_occ[:, level], label=f"Level {level}")
 
-        # Mean occupation of each single-particle level
-        st.subheader("2. Mean occupation of each energy level")
+            ax.set_xlabel("Time")
+            ax.set_ylabel("Mean boson number")
+            ax.grid(alpha=0.3)
+            ax.legend()
+            fig.tight_layout()
+            st.pyplot(fig)
+            plt.close(fig)
 
-        mean_occ = np.zeros((len(times), int(M)))
-
-        for j, occ in enumerate(basis):
-            for level in range(int(M)):
-                mean_occ[:, level] += populations[:, j] * occ[level]
-
-        fig, ax = plt.subplots(figsize=(9, 5))
-
-        for level in range(int(M)):
-            ax.plot(
-                times,
-                mean_occ[:, level],
-                label=f"Level {level}",
+            st.subheader("3. Final density matrix")
+            rho_df = pd.DataFrame(
+                final_rho.full(), index=labels, columns=labels
+            )
+            st.dataframe(rho_df, use_container_width=True)
+            st.download_button(
+                "Download density matrix CSV",
+                rho_df.to_csv().encode("utf-8"),
+                "bosonic_density_matrix.csv",
+                "text/csv",
             )
 
-        ax.set_xlabel("Time")
-        ax.set_ylabel("Mean boson number")
-        ax.grid(True, alpha=0.3)
-        ax.legend()
-        fig.tight_layout()
-        st.pyplot(fig)
-        plt.close(fig)
+            st.subheader("4. Final populations")
+            pop_df = pd.DataFrame({
+                "Occupation state": labels,
+                "Energy": energies,
+                "Final population": populations[-1],
+            })
+            st.dataframe(pop_df, use_container_width=True)
+            st.download_button(
+                "Download populations CSV",
+                pop_df.to_csv(index=False).encode("utf-8"),
+                "bosonic_populations.csv",
+                "text/csv",
+            )
 
-        # Final density matrix
-        st.subheader("3. Final density matrix")
-
-        labels = [str(s) for s in basis]
-        rho_array = final_rho.full()
-
-        rho_df = pd.DataFrame(
-            rho_array,
-            index=labels,
-            columns=labels,
-        )
-
-        st.write("Rows and columns correspond to occupation states.")
-        st.dataframe(rho_df, use_container_width=True)
-
-        st.download_button(
-            "Download density matrix (CSV)",
-            data=rho_df.to_csv().encode("utf-8"),
-            file_name="final_density_matrix.csv",
-            mime="text/csv",
-        )
-
-        # Final population table
-        st.subheader("4. Final-state populations")
-
-        pop_df = pd.DataFrame({
-            "Occupation state": labels,
-            "Energy": energies,
-            "Final population": populations[-1],
-        })
-
-        st.dataframe(pop_df, use_container_width=True)
-
-        st.download_button(
-            "Download populations (CSV)",
-            data=pop_df.to_csv(index=False).encode("utf-8"),
-            file_name="final_populations.csv",
-            mime="text/csv",
-        )
-
-        # Basic physical checks
-        st.subheader("5. Physical checks")
-
-        trace = complex(final_rho.tr())
-        hermitian = final_rho.isherm
-        hermiticity_error = np.linalg.norm(
-            rho_array - rho_array.conj().T
-        )
-
-        st.write(f"Trace: {trace.real:.10f}")
-        st.write(f"Hermitian: {hermitian}")
-        st.write(f"Hermiticity error: {hermiticity_error:.3e}")
-        st.write(
-            "Total final population: "
-            f"{populations[-1].sum():.10f}"
-        )
-
-        if abs(trace.imag) > 1e-8 or abs(trace.real - 1.0) > 1e-6:
-            st.warning("The trace check did not pass the chosen tolerance.")
-
-        if not hermitian or hermiticity_error > 1e-6:
-            st.warning("The Hermiticity check did not pass.")
-
-        if np.min(populations[-1]) < -1e-7:
-            st.warning("A negative population was detected.")
+            rho = final_rho.full()
+            st.subheader("5. Physical checks")
+            st.write(f"Trace: {np.real(final_rho.tr()):.10f}")
+            st.write(f"Hermitian: {final_rho.isherm}")
+            st.write(
+                "Hermiticity error: "
+                f"{np.linalg.norm(rho - rho.conj().T):.3e}"
+            )
+            st.write(f"Total population: {populations[-1].sum():.10f}")
 
     except Exception as exc:
-        st.error("The simulation failed.")
+        st.error("Bosonic simulation failed.")
         st.exception(exc)
 
+
+# ============================================================
+# 3. SPIN-POLARIZED FERMIONIC QUANTUM OTTO ENGINE
+# ============================================================
+
+def generate_fermion_states(NF, M):
+    """Each spin-polarized fermion level can be empty or occupied."""
+    states = []
+
+    for occupied in combinations(range(M), NF):
+        state = [0] * M
+
+        for i in occupied:
+            state[i] = 1
+
+        states.append(tuple(state))
+
+    return states
+
+
+def fermion_energy_coefficients(states):
+    """Dimensionless energy coefficients q = sum(i * n_i)."""
+    return np.array([
+        sum(i * n for i, n in enumerate(state))
+        for state in states
+    ], dtype=float)
+
+
+def make_fermion_edges(states, state_index, M):
+    """Allowed moves: one fermion moves from an occupied level to an empty one."""
+    edges = []
+
+    for src, state in enumerate(states):
+        for j in range(1, M):
+            if state[j] == 0:
+                continue
+
+            for i in range(j):
+                if state[i] == 1:
+                    continue
+
+                target = list(state)
+                target[i] = 1
+                target[j] = 0
+
+                dst = state_index[tuple(target)]
+                edges.append((src, dst, 1.0, j - i))
+
+    return edges
+
+
+def thermalize_fermion_population(
+    p, edges, gamma, omega, T, tau
+):
+    """Sparse population master equation: dp/dt = G p."""
+    if tau <= 0 or gamma <= 0:
+        return p.copy()
+
+    D = len(p)
+    G = lil_matrix((D, D), dtype=float)
+    outgoing = np.zeros(D)
+
+    for src, dst, strength, gap_levels in edges:
+        dE = omega * gap_levels
+
+        if T <= 0:
+            nbar = 0.0
+        else:
+            x = dE / T
+            nbar = 0.0 if x > 700 else 1.0 / np.expm1(x)
+
+        rate_down = gamma * (nbar + 1.0) * strength
+        rate_up = gamma * nbar * strength
+
+        G[dst, src] += rate_down
+        G[src, dst] += rate_up
+
+        outgoing[src] += rate_down
+        outgoing[dst] += rate_up
+
+    for i in range(D):
+        G[i, i] = -outgoing[i]
+
+    p_new = expm_multiply(G.tocsr() * tau, p)
+    p_new = np.real(p_new)
+    p_new = np.maximum(p_new, 0.0)
+
+    total = p_new.sum()
+
+    if not np.isfinite(total) or total <= 0:
+        raise RuntimeError("Invalid population normalization.")
+
+    return p_new / total
+
+
+def one_fermion_otto_cycle(
+    p, edges, q, gamma, wc, wh, Tc, Th, tau_c, tau_h
+):
+    """Cold isochore followed by hot isochore."""
+    p_c = thermalize_fermion_population(
+        p, edges, gamma, wc, Tc, tau_c
+    )
+    p_h = thermalize_fermion_population(
+        p_c, edges, gamma, wh, Th, tau_h
+    )
+
+    mean_q_c = np.dot(q, p_c)
+    mean_q_h = np.dot(q, p_h)
+
+    # Work extracted in this cycle; same convention as supplied code.
+    Wout = (wh - wc) * (mean_q_h - mean_q_c)
+
+    return p_h, p_c, p_h, Wout
+
+
+def run_fermion_simulation(
+    M, Tc, Th, gamma, wh, wc_values, tau_c, tau_h, Ncycles
+):
+    all_work = {}
+    summary = []
+
+    for NF in range(1, M):
+        states = generate_fermion_states(NF, M)
+        state_index = {s: i for i, s in enumerate(states)}
+        D = comb(M, NF)
+        q = fermion_energy_coefficients(states)
+        edges = make_fermion_edges(states, state_index, M)
+
+        ground = tuple(1 if i < NF else 0 for i in range(M))
+        p_initial = np.zeros(D)
+        p_initial[state_index[ground]] = 1.0
+
+        work_values = []
+
+        for wc in wc_values:
+            p = p_initial.copy()
+            Wout = 0.0
+
+            for _ in range(Ncycles):
+                p, p_c, p_h, Wout = one_fermion_otto_cycle(
+                    p, edges, q, gamma, float(wc), wh,
+                    Tc, Th, tau_c, tau_h
+                )
+
+            work_values.append(Wout)
+
+        all_work[NF] = np.asarray(work_values)
+
+        summary.append({
+            "Fermion number (NF)": NF,
+            "Hilbert dimension": D,
+            "Transitions": len(edges),
+        })
+
+    return all_work, pd.DataFrame(summary)
+
+
+def show_fermionic_engine():
+    st.header("Fermionic Quantum Otto Engine")
+    st.write(
+        "Spin-polarized fermions in M equally spaced energy levels. "
+        "The app automatically simulates NF = 1, 2, ..., M−1."
+    )
+
+    st.info(
+        "The plotted quantity is the work output in the final cycle, "
+        "matching your original program. The population model uses a sparse "
+        "rate matrix to reduce memory use."
+    )
+
+    st.sidebar.subheader("Fermionic engine parameters")
+
+    M = int(st.sidebar.number_input(
+        "Fermion energy levels (M)", 2, 8, 3, key="f_M"
+    ))
+    Tc = float(st.sidebar.number_input(
+        "Cold temperature (Tc)", 0.01, 100.0, 1.0, step=0.1, key="f_Tc"
+    ))
+    Th = float(st.sidebar.number_input(
+        "Hot temperature (Th)", 0.01, 100.0, 3.0, step=0.1, key="f_Th"
+    ))
+    gamma = float(st.sidebar.number_input(
+        "Bath coupling (γ)", 0.001, 100.0, 1.0, step=0.1, key="f_gamma"
+    ))
+    wh = float(st.sidebar.number_input(
+        "Hot frequency (ωh)", 0.01, 100.0, 2.0, step=0.1, key="f_wh"
+    ))
+    wc_min = float(st.sidebar.number_input(
+        "Minimum cold frequency (ωc)", 0.01, 100.0, 0.2,
+        step=0.1, key="f_wc_min"
+    ))
+    wc_max = float(st.sidebar.number_input(
+        "Maximum cold frequency (ωc)", 0.02, 100.0, 1.9,
+        step=0.1, key="f_wc_max"
+    ))
+    wc_points = int(st.sidebar.number_input(
+        "Number of frequency points", 5, 100, 30, step=5,
+        key="f_wc_points"
+    ))
+    tau_c = float(st.sidebar.number_input(
+        "Cold contact time (τc)", 0.0, 100.0, 2.0,
+        step=0.5, key="f_tau_c"
+    ))
+    tau_h = float(st.sidebar.number_input(
+        "Hot contact time (τh)", 0.0, 100.0, 2.0,
+        step=0.5, key="f_tau_h"
+    ))
+    Ncycles = int(st.sidebar.number_input(
+        "Number of Otto cycles", 1, 100, 10, key="f_cycles"
+    ))
+
+    st.sidebar.caption(
+        "Each fermion-number sector has dimension C(M, NF)."
+    )
+
+    if not st.button("▶ Run Fermionic Engine", type="primary"):
+        st.info("Set the parameters and tap Run Fermionic Engine.")
+        return
+
+    if wc_min >= wc_max:
+        st.error("Minimum cold frequency must be smaller than maximum.")
+        return
+
+    if Th <= Tc:
+        st.warning("Th should exceed Tc for the usual heat-engine setup.")
+
+    if wc_max >= wh:
+        st.warning(
+            "Some cold frequencies are at or above ωh; inspect these points "
+            "carefully when interpreting engine operation."
+        )
+
+    wc_values = np.linspace(wc_min, wc_max, wc_points)
+
+    try:
+        with st.spinner("Calculating all fermion-number sectors..."):
+            all_work, summary_df = run_fermion_simulation(
+                M, Tc, Th, gamma, wh, wc_values,
+                tau_c, tau_h, Ncycles
+            )
+
+            st.success("Fermionic simulation completed.")
+
+            st.subheader("1. Hilbert-space summary")
+            st.dataframe(summary_df, use_container_width=True)
+
+            st.subheader("2. Work output versus frequency ratio")
+            fig, ax = plt.subplots(figsize=(9, 5))
+
+            for NF, work_values in all_work.items():
+                ax.plot(
+                    wc_values / wh,
+                    work_values,
+                    marker="o",
+                    markersize=3,
+                    label=f"{NF} spin-polarized fermion(s)",
+                )
+
+            ax.axhline(0, linestyle="--", color="black", linewidth=1)
+            ax.set_xlabel(r"$\omega_c/\omega_h$")
+            ax.set_ylabel(r"$W_{\mathrm{out}}$ (final cycle)")
+            ax.set_title(f"Fermionic Quantum Otto Engine: M = {M}")
+            ax.grid(True, alpha=0.3)
+            ax.legend()
+            fig.tight_layout()
+            st.pyplot(fig)
+            plt.close(fig)
+
+            st.subheader("3. Numerical results")
+            data = {
+                "wc": wc_values,
+                "wc/wh": wc_values / wh,
+            }
+
+            for NF, work_values in all_work.items():
+                data[f"Work_NF_{NF}"] = work_values
+
+            work_df = pd.DataFrame(data)
+            st.dataframe(work_df, use_container_width=True)
+            st.download_button(
+                "Download work-output CSV",
+                work_df.to_csv(index=False).encode("utf-8"),
+                "fermionic_otto_work_output.csv",
+                "text/csv",
+            )
+
+            st.subheader("4. Maximum work in the scanned range")
+            best = []
+
+            for NF, work_values in all_work.items():
+                idx = int(np.argmax(work_values))
+                best.append({
+                    "NF": NF,
+                    "Maximum final-cycle work": work_values[idx],
+                    "At wc": wc_values[idx],
+                    "At wc/wh": wc_values[idx] / wh,
+                    "Positive-work points": int(np.sum(work_values > 0)),
+                })
+
+            st.dataframe(pd.DataFrame(best), use_container_width=True)
+            st.caption(
+                "Positive work indicates extracted work under the sign convention "
+                "used in this model. A positive value alone does not establish the "
+                "efficiency or full thermodynamic performance of the engine."
+            )
+
+    except Exception as exc:
+        st.error("Fermionic simulation failed.")
+        st.exception(exc)
+
+
+# ============================================================
+# 4. DISPLAY THE SELECTED SIMULATION
+# ============================================================
+
+if page == "Bosonic Lindblad Solver":
+    show_bosonic_solver()
 else:
-    st.subheader("Ready to simulate")
-    st.write(
-        "Choose your parameters in the sidebar, then tap "
-        "**Run Simulation** to calculate the time evolution."
-    )
-    st.write(
-        "Start with 2 bosons, 3 levels, T = 3, ω = 1, and γ = 1."
-    )
+    show_fermionic_engine()
