@@ -1,4 +1,4 @@
-!pip install qutip streamlit
+
 
 import math
 from itertools import product, combinations
